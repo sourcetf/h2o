@@ -51,42 +51,6 @@
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
-
-#if defined(__OpenBSD__)
-/* 
- * Dummy references to ensure weak symbols used by OpenSSL/BoringSSL (like pthread_once, 
- * pthread_atfork, pthread_rwlock_*) are properly resolved by the dynamic linker on OpenBSD 
- * when neverbleed is disabled, or by the static linker when statically linked.
- * Otherwise, OpenSSL RAND_poll/RAND_add may jump to a NULL pointer.
- */
-volatile void *dummy_clock_gettime = &clock_gettime;
-volatile void *dummy_pthread_once = &pthread_once;
-volatile void *dummy_pthread_mutex_init = &pthread_mutex_init;
-volatile void *dummy_pthread_mutex_lock = &pthread_mutex_lock;
-volatile void *dummy_pthread_mutex_unlock = &pthread_mutex_unlock;
-volatile void *dummy_pthread_mutex_destroy = &pthread_mutex_destroy;
-volatile void *dummy_pthread_atfork = &pthread_atfork;
-volatile void *dummy_pthread_rwlock_init = &pthread_rwlock_init;
-volatile void *dummy_pthread_rwlock_rdlock = &pthread_rwlock_rdlock;
-volatile void *dummy_pthread_rwlock_wrlock = &pthread_rwlock_wrlock;
-volatile void *dummy_pthread_rwlock_unlock = &pthread_rwlock_unlock;
-volatile void *dummy_pthread_rwlock_destroy = &pthread_rwlock_destroy;
-volatile void *dummy_pthread_key_create = &pthread_key_create;
-volatile void *dummy_pthread_key_delete = &pthread_key_delete;
-volatile void *dummy_pthread_setspecific = &pthread_setspecific;
-volatile void *dummy_pthread_getspecific = &pthread_getspecific;
-volatile void *dummy_pthread_create = &pthread_create;
-volatile void *dummy_pthread_join = &pthread_join;
-volatile void *dummy_pthread_detach = &pthread_detach;
-volatile void *dummy_pthread_self = &pthread_self;
-volatile void *dummy_pthread_equal = &pthread_equal;
-volatile void *dummy_pthread_cond_init = &pthread_cond_init;
-volatile void *dummy_pthread_cond_wait = &pthread_cond_wait;
-volatile void *dummy_pthread_cond_signal = &pthread_cond_signal;
-volatile void *dummy_pthread_cond_broadcast = &pthread_cond_broadcast;
-volatile void *dummy_pthread_cond_destroy = &pthread_cond_destroy;
-#endif
-
 #include <openssl/opensslv.h>
 
 /* OS-specific header files */
@@ -2279,8 +2243,9 @@ static int listener_setup_ssl(h2o_configurator_command_t *cmd, h2o_configurator_
         return -1;
 #if defined(__OpenBSD__)
     if (use_neverbleed) {
-        h2o_configurator_errprintf(cmd, *neverbleed_node, "neverbleed is not supported on OpenBSD");
-        return -1;
+        h2o_configurator_errprintf(cmd, neverbleed_node != NULL ? *neverbleed_node : *ssl_node,
+                                   "[WARNING] neverbleed is not supported on OpenBSD (causes SIGSEGV); disabling it.");
+        use_neverbleed = 0;
     }
 #endif
     if (http2_origin_frame_node != NULL) {
@@ -5035,6 +5000,40 @@ int main(int argc, char **argv)
 #if defined(__OpenBSD__)
     /* Trigger librthread initialization before any fork() to prevent SIGSEGV in child processes */
     pthread_self();
+
+    /* 
+     * Force the static linker to include libpthread symbols. 
+     * BoringSSL relies on these weak symbols. If the user links with -static, 
+     * and puts -lpthread in CMAKE_EXE_LINKER_FLAGS (which puts it at the front),
+     * the static linker will discard the pthread objects.
+     * This unreachable block creates strong references to all necessary pthread functions.
+     */
+    if (argc < 0) {
+        pthread_once(NULL, NULL);
+        pthread_atfork(NULL, NULL, NULL);
+        pthread_mutex_init(NULL, NULL);
+        pthread_mutex_lock(NULL);
+        pthread_mutex_unlock(NULL);
+        pthread_mutex_destroy(NULL);
+        pthread_rwlock_init(NULL, NULL);
+        pthread_rwlock_rdlock(NULL);
+        pthread_rwlock_wrlock(NULL);
+        pthread_rwlock_unlock(NULL);
+        pthread_rwlock_destroy(NULL);
+        pthread_key_create(NULL, NULL);
+        pthread_key_delete(0);
+        pthread_setspecific(0, NULL);
+        pthread_getspecific(0);
+        pthread_create(NULL, NULL, NULL, NULL);
+        pthread_join(0, NULL);
+        pthread_detach(0);
+        pthread_equal(0, 0);
+        pthread_cond_init(NULL, NULL);
+        pthread_cond_wait(NULL, NULL);
+        pthread_cond_signal(NULL);
+        pthread_cond_broadcast(NULL);
+        pthread_cond_destroy(NULL);
+    }
 #endif
 
     close_acme_loader_pipe();
