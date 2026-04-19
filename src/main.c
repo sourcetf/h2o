@@ -5036,6 +5036,10 @@ int pthread_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(vo
 }
 #endif
 
+static void *dummy_thread_func(void *arg) {
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
 #if defined(__OpenBSD__)
@@ -5080,18 +5084,19 @@ int main(int argc, char **argv)
         getentropy(NULL, 0);
     }
 
-    /* 
+    /*
      * Force librthread initialization on OpenBSD to populate _thread_cb.
-     * When linking with -static, __isthreaded is 1 from the start, but 
-     * the libc mutex callbacks (_thread_cb) remain NULL until _rthread_init() 
-     * is called by librthread. 
-     * Calling pthread_attr_init at runtime safely triggers this initialization,
+     * When linking with -static, __isthreaded is 1 from the start, but
+     * the libc mutex callbacks (_thread_cb) remain NULL until _rthread_init()
+     * is called by librthread.
+     * Calling pthread_create at runtime safely triggers this initialization,
      * preventing SIGSEGV in early libc calls (e.g. asr_check_reload -> clock_gettime).
+     * We cannot use pthread_attr_init because it may not be sufficient if it gets optimized out.
      */
     {
-        pthread_attr_t dummy_attr;
-        pthread_attr_init(&dummy_attr);
-        pthread_attr_destroy(&dummy_attr);
+        pthread_t dummy_thread;
+        pthread_create(&dummy_thread, NULL, dummy_thread_func, NULL);
+        pthread_join(dummy_thread, NULL);
     }
 #endif
 
