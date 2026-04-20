@@ -416,6 +416,34 @@ static void set_cloexec(int fd)
     }
 }
 
+#if defined(__OpenBSD__)
+/*
+ * Provide dummy implementations for weak symbols used by OpenSSL/BoringSSL.
+ * On OpenBSD, libc lacks `getauxval` and `getrandom`, causing these weak symbols to be NULL.
+ * During static linking, aggressive compiler optimization (like DCE/VRP) may remove the
+ * `if (getauxval != NULL)` check, leading to a SIGSEGV at 0x0.
+ * Providing strong symbols here guarantees they have a valid address.
+ */
+unsigned long getauxval(unsigned long type)
+{
+    (void)type;
+    return 0;
+}
+
+int getrandom(void *buf, size_t buflen, unsigned int flags)
+{
+    (void)buf;
+    (void)buflen;
+    (void)flags;
+    errno = ENOSYS;
+    return -1;
+}
+#endif
+
+static void *dummy_thread_func(void *arg) {
+    return NULL;
+}
+
 static void on_neverbleed_fork(void)
 {
 /* Rewrite of argv should only be done on platforms that are known to benefit from doing that. On linux, doing so helps admins look
@@ -424,6 +452,21 @@ static void on_neverbleed_fork(void)
     for (int i = cmd_argc - 1; i >= 0; --i)
         memset(cmd_argv[i], 0, strlen(cmd_argv[i]));
     strcpy(cmd_argv[0], "neverbleed");
+#endif
+
+#if defined(__OpenBSD__)
+    /*
+     * Force librthread initialization on OpenBSD for the neverbleed daemon process.
+     * Since neverbleed is forked before the main process initializes threads,
+     * the daemon process inherits a single-threaded state. However, OpenSSL
+     * running inside the daemon might call libc functions (e.g. clock_gettime
+     * via RAND_bytes) that expect _thread_cb to be populated.
+     */
+    {
+        pthread_t dummy_thread;
+        pthread_create(&dummy_thread, NULL, dummy_thread_func, NULL);
+        pthread_join(dummy_thread, NULL);
+    }
 #endif
 }
 
@@ -4995,12 +5038,47 @@ static void create_per_thread_listeners(void)
     }
 }
 
-static void *dummy_thread_func(void *arg) {
-    return NULL;
-}
-
 int main(int argc, char **argv)
 {
+#if defined(__OpenBSD__)
+    /*
+     * Force the static linker to include libpthread symbols.
+     * BoringSSL relies on these weak symbols. If the user links with -static,
+     * the static linker will not extract them unless there is a strong reference.
+     * This unreachable block creates strong references to all necessary functions.
+     * We use a volatile variable to defeat compiler's Value Range Propagation (VRP)
+     * and Dead Code Elimination (DCE) which would otherwise completely remove this block.
+     */
+    volatile int dummy_zero = 0;
+    if (dummy_zero != 0) {
+        pthread_once(NULL, NULL);
+        pthread_atfork(NULL, NULL, NULL);
+        pthread_mutex_init(NULL, NULL);
+        pthread_mutex_lock(NULL);
+        pthread_mutex_unlock(NULL);
+        pthread_mutex_destroy(NULL);
+        pthread_rwlock_init(NULL, NULL);
+        pthread_rwlock_rdlock(NULL);
+        pthread_rwlock_wrlock(NULL);
+        pthread_rwlock_unlock(NULL);
+        pthread_rwlock_destroy(NULL);
+        pthread_key_create(NULL, NULL);
+        pthread_key_delete(0);
+        pthread_setspecific(0, NULL);
+        pthread_getspecific(0);
+        pthread_create(NULL, NULL, NULL, NULL);
+        pthread_join(0, NULL);
+        pthread_detach(0);
+        pthread_equal(0, 0);
+        pthread_cond_init(NULL, NULL);
+        pthread_cond_wait(NULL, NULL);
+        pthread_cond_signal(NULL);
+        pthread_cond_broadcast(NULL);
+        pthread_cond_destroy(NULL);
+        getentropy(NULL, 0);
+    }
+#endif
+
     close_acme_loader_pipe();
 
     cmd_argc = argc;
