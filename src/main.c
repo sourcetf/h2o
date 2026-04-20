@@ -4995,6 +4995,9 @@ static void create_per_thread_listeners(void)
     }
 }
 
+static void *dummy_thread_func(void *arg) {
+    return NULL;
+}
 
 int main(int argc, char **argv)
 {
@@ -5361,6 +5364,19 @@ int main(int argc, char **argv)
         fprintf(fp, "%d\n", (int)getpid());
         fclose(fp);
     }
+
+#if defined(__OpenBSD__)
+    /*
+     * Force librthread initialization on OpenBSD to populate _thread_cb.
+     * Calling pthread_create at runtime safely triggers this initialization,
+     * preventing SIGSEGV in early libc calls (e.g. asr_check_reload -> clock_gettime, fstat, etc.).
+     */
+    {
+        pthread_t dummy_thread;
+        pthread_create(&dummy_thread, NULL, dummy_thread_func, NULL);
+        pthread_join(dummy_thread, NULL);
+    }
+#endif
 
     /* build barrier to synchronize the start of all threads */
     assert(conf.thread_map.size != 0);
