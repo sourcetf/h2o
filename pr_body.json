@@ -1,0 +1,6 @@
+{
+  "title": "Fix OpenBSD SIGSEGV in neverbleed_init during RAND_bytes",
+  "body": "This PR fixes a critical SIGSEGV on OpenBSD when static linking with BoringSSL.\n\n**Root Cause:**\nIn `deps/neverbleed/neverbleed.c`, the `neverbleed_init` function calls `RAND_bytes` to generate an authentication token before the main process has fully initialized its multi-threading environment.\nBoringSSL's `RAND_bytes` internally relies on `clock_gettime` to gather entropy. On OpenBSD, if `librthread` has not been explicitly triggered to populate the `_thread_cb` structure (which happens implicitly upon the first `pthread_create` call), calling `clock_gettime` results in a NULL pointer dereference (SEGV_MAPERR at addr=0x0).\n\n**Fix:**\nWe introduce a targeted, short-lived `dummy_thread` immediately prior to the `RAND_bytes` invocation in `neverbleed_init` (guarded by `#if defined(__OpenBSD__)`). This safely and legally forces OpenBSD's `libc` to fully populate its internal mutex/lock callbacks via `_rthread_init`, entirely preventing the subsequent `clock_gettime` crash.",
+  "head": "trae/solo-agent-hGnbtH",
+  "base": "master"
+}
