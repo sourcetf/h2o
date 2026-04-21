@@ -1,0 +1,15 @@
+[server]
+port = 8080
+
+[[routes]]
+domain = "localhost"
+upstream = "127.0.0.1:9190"
+
+[proxy]
+[[proxy.tcp]]
+listen_port = 8081
+upstream = "127.0.0.1:9191"
+
+[[proxy.udp]]
+listen_port = 8082
+upstream = "127.0.0.1:9192"

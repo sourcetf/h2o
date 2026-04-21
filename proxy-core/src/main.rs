@@ -25,6 +25,9 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)
         .expect("setting default subscriber failed");
 
+    // Install default crypto provider
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     // For demonstration, create a default config if file is missing
     let config_path = "config.toml";
     let config = Config::load(config_path).unwrap_or_else(|_| {
