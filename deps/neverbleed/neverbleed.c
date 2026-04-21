@@ -2162,6 +2162,21 @@ int neverbleed_init(neverbleed_t *nb, char *errbuf)
     memset(&nb->sun_, 0, sizeof(nb->sun_));
     nb->sun_.sun_family = AF_UNIX;
     snprintf(nb->sun_.sun_path, sizeof(nb->sun_.sun_path), "%s/_", tempdir);
+
+#if defined(__OpenBSD__)
+    /*
+     * Ensure librthread is initialized before RAND_bytes is called.
+     * RAND_bytes calls clock_gettime which can crash on OpenBSD if
+     * _thread_cb is not populated.
+     */
+    {
+        static void *dummy_func(void *arg) { return NULL; }
+        pthread_t dummy_thread;
+        pthread_create(&dummy_thread, NULL, dummy_func, NULL);
+        pthread_join(dummy_thread, NULL);
+    }
+#endif
+
     RAND_bytes(nb->auth_token, sizeof(nb->auth_token));
     if ((listen_fd = socket(PF_UNIX, SOCK_STREAM, 0)) == -1) {
         snprintf(errbuf, NEVERBLEED_ERRBUF_SIZE, "socket(2) failed:%s", strerror(errno));
