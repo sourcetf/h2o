@@ -26,3 +26,5 @@ hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 tokio-rustls = "0.26"
 mimalloc = "0.1.49"
+socket2 = { version = "0.6.3", features = ["all"] }
+libc = "0.2.185"

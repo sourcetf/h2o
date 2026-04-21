@@ -15,9 +15,9 @@ use quic::QuicServer;
 use std::sync::Arc;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
+use std::thread;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Initialize tracing for logging
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::WARN)
@@ -52,23 +52,54 @@ async fn main() -> Result<()> {
 
     let config_arc = Arc::new(config.clone());
     
-    // Start QUIC Server if enabled
+    // Spawn QUIC Server thread
     if config_arc.quic.enable {
         let quic_config = Arc::clone(&config_arc);
-        tokio::spawn(async move {
-            match QuicServer::new(quic_config) {
-                Ok(quic_server) => {
-                    if let Err(e) = quic_server.run().await {
-                        tracing::error!("QUIC server error: {}", e);
+        thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                match QuicServer::new(quic_config) {
+                    Ok(quic_server) => {
+                        if let Err(e) = quic_server.run().await {
+                            tracing::error!("QUIC server error: {}", e);
+                        }
                     }
+                    Err(e) => tracing::error!("Failed to start QUIC server: {}", e),
                 }
-                Err(e) => tracing::error!("Failed to start QUIC server: {}", e),
-            }
+            });
         });
     }
 
-    let srv = Server::new(config);
-    srv.run().await?;
+    // Advanced Multi-Core architecture: Thread-per-core with SO_REUSEPORT
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    info!("Spawning {} worker threads for HTTP/HTTPS...", cores);
+
+    let mut handles = vec![];
+    for i in 0..cores {
+        let cfg = config.clone();
+        let handle = thread::spawn(move || {
+            // Each thread gets its own single-threaded Tokio runtime
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async move {
+                let srv = Server::new(cfg);
+                if let Err(e) = srv.run().await {
+                    tracing::error!("Worker {} failed: {}", i, e);
+                }
+            });
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
 
     Ok(())
 }

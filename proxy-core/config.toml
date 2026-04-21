@@ -6,11 +6,9 @@ cert_path = "/workspace/certs/p384.crt"
 key_path = "/workspace/certs/p384.key"
 
 [server.tls]
-alpn_protocols = ["h3", "h2", "http/1.1", "qmux"]
-cipher_suites = ["TLS13_AES_256_GCM_SHA384"]
-ec_curves = ["X25519MLKEM768"]
-zero_rtt = true
-pqc_hybrid = true
+alpn_protocols = ["h3", "h2", "http/1.1"]
+zero_rtt = false
+pqc_hybrid = false
 
 [quic]
 enable = true
