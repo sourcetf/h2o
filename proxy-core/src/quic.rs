@@ -96,31 +96,60 @@ impl QuicServer {
     async fn handle_request<T>(
         req: Request<()>,
         mut stream: h3::server::RequestStream<T, Bytes>,
-        _config: Arc<Config>,
+        config: Arc<Config>,
     ) -> Result<()>
     where
         T: h3::quic::BidiStream<Bytes>,
     {
-        // 4. Implement HTTP header parsing and custom Header injection/modification
-        let mut builder = Response::builder()
-            .status(StatusCode::OK)
-            .header("Server", "proxy-core/h3")
-            .header("X-Custom-Injected", "true");
-
-        // Parse and log incoming headers
-        for (name, value) in req.headers() {
-            debug!("Header parsed: {}: {:?}", name, value);
-            // Example of modifying/forwarding headers
-            if name.as_str().starts_with("x-forward-") {
-                builder = builder.header(name, value);
+        use http_body_util::BodyExt;
+        
+        let mut req_builder = http::Request::builder()
+            .method(req.method().clone())
+            .uri(req.uri().clone())
+            .version(req.version());
+            
+        for (k, v) in req.headers().iter() {
+            req_builder = req_builder.header(k.clone(), v.clone());
+        }
+        
+        let hyper_req = req_builder.body(http_body_util::Empty::<bytes::Bytes>::new().map_err(|never| match never {}).boxed()).unwrap();
+        
+        let proxy_res = crate::proxy::handle_http_request(hyper_req, config).await;
+        
+        match proxy_res {
+            Ok(mut res) => {
+                let mut builder = http::Response::builder()
+                    .status(res.status())
+                    .version(http::Version::HTTP_3)
+                    .header("server", "proxy-core/h3")
+                    .header("x-custom-injected", "true");
+                    
+                for (k, v) in res.headers().iter() {
+                    builder = builder.header(k.clone(), v.clone());
+                }
+                
+                let response = builder.body(()).map_err(|e| anyhow::anyhow!("Failed to build response: {}", e))?;
+                stream.send_response(response).await?;
+                
+                while let Some(frame) = res.frame().await {
+                    if let Ok(frame) = frame {
+                        if let Some(data) = frame.data_ref() {
+                            stream.send_data(data.clone()).await?;
+                        }
+                    }
+                }
+                stream.finish().await?;
+            }
+            Err(e) => {
+                let response = http::Response::builder()
+                    .status(502)
+                    .body(())
+                    .unwrap();
+                stream.send_response(response).await?;
+                stream.send_data(bytes::Bytes::from(format!("Bad Gateway: {}", e))).await?;
+                stream.finish().await?;
             }
         }
-
-        let response = builder.body(()).map_err(|e| anyhow!("Failed to build response: {}", e))?;
-
-        stream.send_response(response).await?;
-        stream.send_data(Bytes::from("Hello from HTTP/3 & QUIC Proxy!")).await?;
-        stream.finish().await?;
 
         Ok(())
     }

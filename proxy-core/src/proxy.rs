@@ -15,11 +15,18 @@ use tracing::{error, info};
 
 use crate::config::Config;
 
-static HTTP_CLIENT: OnceLock<Client<HttpConnector, Incoming>> = OnceLock::new();
+static HTTP_CLIENT: OnceLock<Client<HttpConnector, BoxBody<Bytes, hyper::Error>>> = OnceLock::new();
 
-fn get_client() -> &'static Client<HttpConnector, Incoming> {
+fn get_client() -> &'static Client<HttpConnector, BoxBody<Bytes, hyper::Error>> {
     HTTP_CLIENT.get_or_init(|| {
-        Client::builder(TokioExecutor::new()).build(HttpConnector::new())
+        let mut connector = HttpConnector::new();
+        connector.set_nodelay(true);
+        connector.set_keepalive(Some(std::time::Duration::from_secs(60)));
+        
+        Client::builder(TokioExecutor::new())
+            .pool_max_idle_per_host(500)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build(connector)
     })
 }
 
@@ -31,21 +38,20 @@ pub fn empty_body() -> BoxBody<Bytes, hyper::Error> {
 
 /// Handle a single HTTP request (including reverse proxy and WSS upgrade)
 pub async fn handle_http_request(
-    mut req: Request<Incoming>,
+    mut req: Request<BoxBody<Bytes, hyper::Error>>,
     config: Arc<Config>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    let host = req.headers().get("host").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let host = req.headers().get("host").and_then(|v| v.to_str().ok()).or_else(|| req.uri().host()).unwrap_or("");
     
     // Find matching route
     let upstream = config.routes.iter()
         .find(|r| host.contains(&r.domain))
-        .map(|r| r.upstream.clone())
-        .unwrap_or_else(|| "127.0.0.1:8080".to_string()); // Default upstream or error
+        .map(|r| r.upstream.as_str())
+        .unwrap_or("127.0.0.1:9190"); // Default upstream or error
 
     // Handle WebSocket Upgrade
     if req.headers().get(UPGRADE).map(|v| v.as_bytes()).unwrap_or(b"") == b"websocket" {
-        info!("Handling WebSocket upgrade for {}", host);
-        let upstream_clone = upstream.clone();
+        let upstream_clone = upstream.to_string();
         
         tokio::task::spawn(async move {
             match hyper::upgrade::on(&mut req).await {
@@ -66,10 +72,16 @@ pub async fn handle_http_request(
     }
 
     // Normal HTTP reverse proxy
-    info!("Proxying HTTP request to {}", upstream);
-    
-    let uri_string = format!("http://{}{}", upstream, req.uri().path_and_query().map(|x| x.as_str()).unwrap_or("/"));
-    *req.uri_mut() = uri_string.parse().unwrap();
+    let pq = req.uri().path_and_query().cloned().unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
+    let uri = hyper::Uri::builder()
+        .scheme("http")
+        .authority(upstream)
+        .path_and_query(pq)
+        .build()
+        .unwrap();
+    *req.uri_mut() = uri;
+    // Downgrade the version to HTTP/1.1 for the backend connection
+    *req.version_mut() = hyper::Version::HTTP_11;
 
     let client = get_client();
     match client.request(req).await {

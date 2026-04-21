@@ -1,6 +1,23 @@
 [server]
 port = 8080
 
+[[server.tls.certs]]
+cert_path = "/workspace/certs/rsa.crt"
+key_path = "/workspace/certs/rsa.key"
+
+[[server.tls.certs]]
+cert_path = "/workspace/certs/ecc.crt"
+key_path = "/workspace/certs/ecc.key"
+
+[server.tls]
+alpn_protocols = ["h3", "h2", "http/1.1"]
+
+[quic]
+enable = true
+port = 8443
+multipath = true
+qmux = true
+
 [[routes]]
 domain = "localhost"
 upstream = "127.0.0.1:9190"

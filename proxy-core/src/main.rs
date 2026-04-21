@@ -20,7 +20,7 @@ use tracing_subscriber::FmtSubscriber;
 async fn main() -> Result<()> {
     // Initialize tracing for logging
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_max_level(Level::WARN)
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("setting default subscriber failed");

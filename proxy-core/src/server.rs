@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, error};
-use hyper::server::conn::http1;
+use hyper_util::server::conn::auto;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio_rustls::TlsAcceptor;
@@ -78,19 +78,21 @@ impl Server {
                     
                     // Spawn a new task for each connection
                     tokio::spawn(async move {
+                        let _ = stream.set_nodelay(true);
+                        
                         if let Some(acceptor) = acceptor {
                             match acceptor.accept(stream).await {
                                 Ok(tls_stream) => {
                                     let io = TokioIo::new(tls_stream);
-                                    if let Err(err) = http1::Builder::new()
+                                    let builder = auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+                                    if let Err(err) = builder
                                         .serve_connection(
                                             io,
                                             service_fn(move |req| {
                                                 let cfg = Arc::clone(&cfg);
-                                                handle_http_request(req, cfg)
+                                                handle_http_request(req.map(|b| http_body_util::BodyExt::boxed(b)), cfg)
                                             }),
                                         )
-                                        .with_upgrades()
                                         .await
                                     {
                                         error!("Error serving TLS connection from {}: {:?}", peer_addr, err);
@@ -102,15 +104,15 @@ impl Server {
                             }
                         } else {
                             let io = TokioIo::new(stream);
-                            if let Err(err) = http1::Builder::new()
+                            let builder = auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+                            if let Err(err) = builder
                                 .serve_connection(
                                     io,
                                     service_fn(move |req| {
                                         let cfg = Arc::clone(&cfg);
-                                        handle_http_request(req, cfg)
+                                        handle_http_request(req.map(|b| http_body_util::BodyExt::boxed(b)), cfg)
                                     }),
                                 )
-                                .with_upgrades()
                                 .await
                             {
                                 error!("Error serving connection from {}: {:?}", peer_addr, err);
