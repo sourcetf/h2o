@@ -35,7 +35,11 @@ echo "=========================================="
 echo "    基准测试：并发与吞吐量 (HTTP/3)       "
 echo "=========================================="
 echo "HTTP/3 压测使用 h3bench 测试 proxy-core (8443):"
-/workspace/h3bench/target/release/h3bench || echo "h3bench failed"
+/workspace/h3bench/target/release/h3bench 8443 || echo "h3bench failed"
+
+echo ""
+echo "HTTP/3 压测使用 h3bench 测试 h2o (8444):"
+/workspace/h3bench/target/release/h3bench 8444 || echo "h3bench failed"
 
 echo "=========================================="
 echo "             测试完成                     "

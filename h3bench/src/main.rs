@@ -61,7 +61,9 @@ async fn main() -> Result<()> {
         quinn::crypto::rustls::QuicClientConfig::try_from(tls_config).unwrap()
     )));
 
-    let addr = "127.0.0.1:8443".parse().unwrap();
+    let port = std::env::args().nth(1).unwrap_or_else(|| "8443".to_string());
+    let addr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let uri = format!("https://localhost:{}/", port);
     
     println!("Connecting to {} over HTTP/3...", addr);
     let conn = endpoint.connect(addr, "localhost")?.await?;
@@ -69,7 +71,8 @@ async fn main() -> Result<()> {
     let (mut driver, mut send_request) = h3::client::new(h3_conn).await?;
 
     tokio::spawn(async move {
-        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+        let e = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+        eprintln!("h3 driver finished: {:?}", e);
     });
 
     println!("Starting HTTP/3 benchmark...");
@@ -78,21 +81,39 @@ async fn main() -> Result<()> {
     
     let mut futures = vec![];
     let semaphore = Arc::new(tokio::sync::Semaphore::new(100));
+    let latencies = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    
     for _ in 0..num_requests {
         let mut sender = send_request.clone();
         let req = http::Request::builder()
             .method("GET")
-            .uri("https://localhost:8443/")
+            .uri(uri.clone())
             .body(())
             .unwrap();
         let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let latencies = latencies.clone();
             
         futures.push(tokio::spawn(async move {
-            let mut stream = sender.send_request(req).await.unwrap();
-            stream.finish().await.unwrap();
-            let _resp = stream.recv_response().await.unwrap();
+            let req_start = Instant::now();
+            let mut stream = match sender.send_request(req).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("send_request err: {:?}", e);
+                    return;
+                }
+            };
+            if let Err(e) = stream.finish().await {
+                return;
+            }
+            let _resp = match stream.recv_response().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return;
+                }
+            };
             // Read body
-            while let Some(_) = stream.recv_data().await.unwrap() {}
+            while let Ok(Some(_)) = stream.recv_data().await {}
+            latencies.lock().await.push(req_start.elapsed().as_micros());
             drop(permit);
         }));
     }
@@ -105,6 +126,14 @@ async fn main() -> Result<()> {
     let qps = (num_requests as f64) / elapsed.as_secs_f64();
     println!("Finished in {:?}", elapsed);
     println!("Requests per second: {:.2}", qps);
+    
+    let mut lats = latencies.lock().await.clone();
+    lats.sort_unstable();
+    if !lats.is_empty() {
+        let sum: u128 = lats.iter().sum();
+        let mean = (sum as f64) / (lats.len() as f64) / 1000.0;
+        println!("Mean latency: {:.2} ms", mean);
+    }
 
     Ok(())
 }

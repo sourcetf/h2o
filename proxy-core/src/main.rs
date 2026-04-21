@@ -11,9 +11,11 @@ use hyper_util::rt::TokioIo;
 use http_body_util::Full;
 use std::convert::Infallible;
 use tokio_rustls::TlsAcceptor;
+use socket2::{Socket, Domain, Type, Protocol};
+use std::net::SocketAddr;
 
 async fn handle_req(_: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
-    Ok(Response::new(Full::new(Bytes::from("HTTP OK"))))
+    Ok(Response::new(Full::new(Bytes::from_static(b"HTTP OK"))))
 }
 
 fn load_certs(filename: &str) -> Result<Vec<CertificateDer<'static>>> {
@@ -39,10 +41,12 @@ fn load_private_key(filename: &str) -> Result<PrivateKeyDer<'static>> {
 
 async fn handle_h3_connection(conn: quinn::Connection) -> Result<()> {
     let mut h3_conn = h3::server::Connection::new(h3_quinn::Connection::new(conn)).await?;
+    let mut join_set = tokio::task::JoinSet::new();
+    
     loop {
         match h3_conn.accept().await {
             Ok(Some(mut req_resolver)) => {
-                tokio::spawn(async move {
+                join_set.spawn(async move {
                     match req_resolver.resolve_request().await {
                         Ok((_req, mut stream)) => {
                             let resp = match http::Response::builder()
@@ -55,7 +59,7 @@ async fn handle_h3_connection(conn: quinn::Connection) -> Result<()> {
                                 eprintln!("h3 send response err: {}", e);
                                 return;
                             }
-                            if let Err(e) = stream.send_data(Bytes::from("HTTP OK")).await {
+                            if let Err(e) = stream.send_data(Bytes::from_static(b"HTTP OK")).await {
                                 eprintln!("h3 send data err: {}", e);
                                 return;
                             }
@@ -67,85 +71,164 @@ async fn handle_h3_connection(conn: quinn::Connection) -> Result<()> {
                     }
                 });
             }
-            Ok(None) => break,
+            Ok(None) => {
+                println!("h3_conn.accept() returned None");
+                break;
+            }
             Err(err) => {
                 eprintln!("Error accepting request: {}", err);
                 break;
             }
         }
     }
+    
+    while let Some(_) = join_set.join_next().await {}
+    
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     
     let certs = load_certs("/workspace/certs/p384.crt")?;
     let key = load_private_key("/workspace/certs/p384.key")?;
     
-    let mut server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs.clone(), key.clone_key())?;
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    println!("Spawning {} worker threads", cores);
+    
+    let mut handles = vec![];
+
+    for i in 0..cores {
+        let certs = certs.clone();
+        let key = key.clone_key();
         
-    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
-    
-    // Start QUIC/H3
-    let mut quic_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
-    quic_config.alpn_protocols = vec![b"h3".to_vec()];
-    
-    let server_config = quinn::crypto::rustls::QuicServerConfig::try_from(quic_config)?;
-    let endpoint = quinn::Endpoint::server(
-        quinn::ServerConfig::with_crypto(Arc::new(server_config)),
-        "0.0.0.0:8443".parse()?,
-    )?;
-    
-    tokio::spawn(async move {
-        println!("proxy-core QUIC listening on 8443");
-        while let Some(incoming) = endpoint.accept().await {
-            tokio::spawn(async move {
-                match incoming.await {
-                    Ok(conn) => {
-                        if let Err(e) = handle_h3_connection(conn).await {
-                            eprintln!("h3 err: {}", e);
-                        }
+        handles.push(std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+                
+            rt.block_on(async move {
+                // HTTPS Configuration
+                let mut server_config = rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(certs.clone(), key.clone_key()).unwrap();
+                server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+                let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+                // QUIC/H3 Configuration
+                let mut quic_config = rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(certs, key).unwrap();
+                quic_config.alpn_protocols = vec![b"h3".to_vec()];
+                let quic_server_config = quinn::crypto::rustls::QuicServerConfig::try_from(quic_config).unwrap();
+                let quic_cfg = quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
+                
+                // QUIC Socket with SO_REUSEPORT
+                let addr_quic: SocketAddr = "0.0.0.0:8443".parse().unwrap();
+                let domain = if addr_quic.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+                let quic_socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+                quic_socket.set_reuse_address(true).unwrap();
+                #[cfg(target_os = "linux")]
+                quic_socket.set_reuse_port(true).unwrap();
+                quic_socket.bind(&addr_quic.into()).unwrap();
+                let std_udp_socket: std::net::UdpSocket = quic_socket.into();
+                std_udp_socket.set_nonblocking(true).unwrap();
+                
+                let endpoint = quinn::Endpoint::new(
+                    quinn::EndpointConfig::default(),
+                    Some(quic_cfg),
+                    std_udp_socket,
+                    Arc::new(quinn::TokioRuntime),
+                ).unwrap();
+
+                // Start QUIC/H3 listener
+                tokio::spawn(async move {
+                    if i == 0 {
+                        println!("proxy-core QUIC listening on 8443");
                     }
-                    Err(e) => eprintln!("quic accept err: {}", e),
+                    while let Some(incoming) = endpoint.accept().await {
+                        tokio::spawn(async move {
+                            match incoming.await {
+                                Ok(conn) => {
+                                    if let Err(e) = handle_h3_connection(conn).await {
+                                        eprintln!("h3 err: {}", e);
+                                    }
+                                }
+                                Err(e) => eprintln!("quic accept err: {}", e),
+                            }
+                        });
+                    }
+                });
+
+                // HTTPS Socket with SO_REUSEPORT
+                let addr_https: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+                let domain = if addr_https.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+                let https_socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP)).unwrap();
+                https_socket.set_reuse_address(true).unwrap();
+                #[cfg(target_os = "linux")]
+                {
+                    https_socket.set_reuse_port(true).unwrap();
+                    // Optional: TCP_DEFER_ACCEPT to delay wakeups until data arrives
+                    unsafe {
+                        let val: libc::c_int = 1;
+                        libc::setsockopt(
+                            std::os::unix::io::AsRawFd::as_raw_fd(&https_socket),
+                            libc::IPPROTO_TCP,
+                            libc::TCP_DEFER_ACCEPT,
+                            &val as *const libc::c_int as *const libc::c_void,
+                            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                        );
+                    }
+                }
+                https_socket.bind(&addr_https.into()).unwrap();
+                https_socket.listen(1024).unwrap();
+                
+                let std_tcp_listener: std::net::TcpListener = https_socket.into();
+                std_tcp_listener.set_nonblocking(true).unwrap();
+                let listener = TcpListener::from_std(std_tcp_listener).unwrap();
+
+                if i == 0 {
+                    println!("proxy-core HTTP/HTTPS listening on 8080");
+                }
+
+                loop {
+                    let (stream, _) = match listener.accept().await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            eprintln!("accept error: {}", e);
+                            continue;
+                        }
+                    };
+                    
+                    let _ = stream.set_nodelay(true); // Optimization: TCP_NODELAY
+                    
+                    let tls_acceptor = tls_acceptor.clone();
+                    
+                    tokio::spawn(async move {
+                        match tls_acceptor.accept(stream).await {
+                            Ok(tls_stream) => {
+                                let io = TokioIo::new(tls_stream);
+                                let mut builder = auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+                                builder.http2().max_concurrent_streams(500);
+                                if let Err(err) = builder
+                                    .serve_connection(io, service_fn(handle_req))
+                                    .await
+                                {
+                                    eprintln!("Error serving connection: {:?}", err);
+                                }
+                            }
+                            Err(e) => eprintln!("tls error: {}", e),
+                        }
+                    });
                 }
             });
-        }
-    });
-
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
-    println!("proxy-core HTTP/HTTPS listening on 8080");
-
-    loop {
-        let (stream, _) = match listener.accept().await {
-            Ok(res) => res,
-            Err(e) => {
-                eprintln!("accept error: {}", e);
-                continue;
-            }
-        };
-        let tls_acceptor = tls_acceptor.clone();
-        
-        tokio::spawn(async move {
-            match tls_acceptor.accept(stream).await {
-                Ok(tls_stream) => {
-                    let io = TokioIo::new(tls_stream);
-                    let builder = auto::Builder::new(hyper_util::rt::TokioExecutor::new());
-                    if let Err(err) = builder
-                        .serve_connection(io, service_fn(handle_req))
-                        .await
-                    {
-                        eprintln!("Error serving connection: {:?}", err);
-                    }
-                }
-                Err(e) => eprintln!("tls error: {}", e),
-            }
-        });
+        }));
     }
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    Ok(())
 }
