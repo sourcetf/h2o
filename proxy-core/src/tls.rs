@@ -103,12 +103,9 @@ pub fn create_tls_config(config: &TlsConfig) -> Result<ServerConfig> {
     // 4. PQC/Hybrid algorithms
     if config.pqc_hybrid.unwrap_or(false) {
         info!("PQC/Hybrid algorithms enabled");
-        // Ensure X25519Kyber768Draft00 is prioritized
+        // Ensure X25519MLKEM768 is prioritized
         let mut groups = crypto_provider.kx_groups.to_vec();
-        // Just an example: aws_lc_rs might provide Kyber out of the box in newer versions
-        // E.g. aws_lc_rs::kx_group::X25519_KYBER768_DRAFT00
-        // For now, we rely on the provider's default which includes PQC if enabled in aws-lc-rs.
-        if let Some(pos) = groups.iter().position(|g| format!("{:?}", g.name()).contains("KYBER")) {
+        if let Some(pos) = groups.iter().position(|g| format!("{:?}", g.name()).contains("MLKEM") || format!("{:?}", g.name()).contains("KYBER")) {
             let kyber = groups.remove(pos);
             groups.insert(0, kyber);
             crypto_provider.kx_groups = groups;
@@ -149,6 +146,12 @@ pub fn create_tls_config(config: &TlsConfig) -> Result<ServerConfig> {
     }
 
     let mut server_config = builder.with_cert_resolver(Arc::new(cert_resolver));
+    
+    // Enable 0-RTT early data if configured
+    if config.zero_rtt.unwrap_or(false) {
+        info!("Enabling 0-RTT (Early Data)");
+        server_config.max_early_data_size = 16384;
+    }
 
     // 7. ALPN negotiation
     if let Some(alpn) = &config.alpn_protocols {

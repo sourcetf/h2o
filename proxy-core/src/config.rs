@@ -36,6 +36,8 @@ pub struct TlsConfig {
     pub ocsp_stapling: Option<bool>,
     /// ALPN protocols to negotiate (e.g. h3, h2, http/1.1).
     pub alpn_protocols: Option<Vec<String>>,
+    /// Enable 0-RTT early data
+    pub zero_rtt: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

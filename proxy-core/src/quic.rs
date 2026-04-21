@@ -28,6 +28,10 @@ impl QuicServer {
             .with_no_client_auth()
             .with_single_cert(certs, key)?;
 
+        if config.server.tls.as_ref().map(|t| t.zero_rtt.unwrap_or(false)).unwrap_or(false) {
+            tls_config.max_early_data_size = 16384;
+        }
+
         // Support ALPN: h3 for HTTP/3, qmux for HTTP/3 over QMux
         let mut alpn = vec![b"h3".to_vec()];
         if quic_cfg.qmux {

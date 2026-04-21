@@ -10,7 +10,9 @@ cert_path = "/workspace/certs/ecc.crt"
 key_path = "/workspace/certs/ecc.key"
 
 [server.tls]
-alpn_protocols = ["h3", "h2", "http/1.1"]
+alpn_protocols = ["h3", "h2", "http/1.1", "qmux"]
+zero_rtt = true
+pqc_hybrid = true
 
 [quic]
 enable = true
