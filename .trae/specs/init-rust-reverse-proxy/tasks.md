@@ -1,0 +1,33 @@
+# Tasks
+- [ ] Task 1: 项目初始化与架构设计
+  - [ ] SubTask 1.1: 创建 Rust 异步项目 (基于 Tokio 或同级别高性能运行时)
+  - [ ] SubTask 1.2: 搭建项目基础结构、配置文件解析与日志模块
+- [ ] Task 2: 编译与集成 BoringSSL
+  - [ ] SubTask 2.1: 配置构建脚本静态编译 BoringSSL
+  - [ ] SubTask 2.2: 封装底层的加密接口以支持自定义加密套件、PSK 和 PQC 混合算法
+- [ ] Task 3: 实现高级 TLS 特性
+  - [ ] SubTask 3.1: 实现 RSA+ECC 双证书加载逻辑
+  - [ ] SubTask 3.2: 实现 NPN/ALPN、自定义 EC 曲线及服务器偏好顺序支持
+  - [ ] SubTask 3.3: 实现 ECH (Encrypted Client Hello) 手工配置开启功能
+  - [ ] SubTask 3.4: 实现 OCSP 装订
+- [ ] Task 4: 实现 HTTP/1.x, HTTP/2 及代理核心逻辑
+  - [ ] SubTask 4.1: 实现基于高性能运行时的 HTTP 服务器协议栈
+  - [ ] SubTask 4.2: 实现自定义 HTTP Header 配置与改写逻辑
+- [ ] Task 5: 实现 QUIC 与 HTTP/3 支持
+  - [ ] SubTask 5.1: 集成 QUIC 协议栈并配置支持 HTTP/3
+  - [ ] SubTask 5.2: 添加 QUIC path migration 和 multipath (draft 05) 支持
+  - [ ] SubTask 5.3: 添加 HTTP/3 over QMux (draft-ietf-quic-qmux-01) 支持
+- [ ] Task 6: 实现通用代理与透传
+  - [ ] SubTask 6.1: 实现 WSS 代理支持
+  - [ ] SubTask 6.2: 实现 TCP/UDP 纯透传协议代理（跳过 SSL 处理）
+- [ ] Task 7: 性能调优与安全审计
+  - [ ] SubTask 7.1: 进行安全最佳实践审计 (遵循 security-best-practices 规范)
+  - [ ] SubTask 7.2: 极限性能测试与调优，对标并超越 h2o
+
+# Task Dependencies
+- [Task 2] depends on [Task 1]
+- [Task 3] depends on [Task 2]
+- [Task 4] depends on [Task 1]
+- [Task 5] depends on [Task 2], [Task 4]
+- [Task 6] depends on [Task 1]
+- [Task 7] depends on [Task 1], [Task 2], [Task 3], [Task 4], [Task 5], [Task 6]
