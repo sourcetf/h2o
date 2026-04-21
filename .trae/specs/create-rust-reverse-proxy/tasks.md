@@ -1,0 +1,32 @@
+# Tasks
+- [x] Task 1: 项目初始化与基础架构设计
+  - [x] SubTask 1.1: 初始化 Rust 项目并配置 `Cargo.toml`（引入 `tokio`, `rustls`, `aws-lc-rs`, `quinn` 等核心依赖）
+  - [x] SubTask 1.2: 设计并实现高性能异步 I/O 架构和内存池/零拷贝机制
+  - [x] SubTask 1.3: 设计全局配置解析模块（支持配置文件或命令行参数加载）
+- [x] Task 2: TLS 与加密模块实现
+  - [x] SubTask 2.1: 集成 `rustls` + `aws-lc-rs`（静态编译）
+  - [x] SubTask 2.2: 实现 RSA + ECC 双证书加载与自动选择
+  - [x] SubTask 2.3: 实现自定义加密套件、PSK 支持以及 EC 椭圆曲线配置（服务器偏好优先）
+  - [x] SubTask 2.4: 集成 PQC (后量子密码) 和混合算法支持
+  - [x] SubTask 2.5: 实现 ECH (Encrypted Client Hello) 的手动开启逻辑
+  - [x] SubTask 2.6: 实现 OCSP 装订功能
+  - [x] SubTask 2.7: 实现 NPN / ALPN 协商逻辑（涵盖 HTTP/1.1, h2, h3 及相关 IEEE 草案）
+- [x] Task 3: HTTP/1.0 - HTTP/3 服务与 QUIC 模块实现
+  - [x] SubTask 3.1: 基于 `quinn` 实现 HTTP/3 服务端，支持 HTTP/1.0-HTTP/3 动态降级与配置
+  - [x] SubTask 3.2: 实现 QUIC path migration 和 multipath (draft 05)
+  - [x] SubTask 3.3: 实现 HTTP/3 over QMux (draft-ietf-quic-qmux-01)
+  - [x] SubTask 3.4: 实现 HTTP 头部解析与用户自定义 Header 注入/修改
+- [x] Task 4: 代理转发层实现
+  - [x] SubTask 4.1: 实现 HTTP/HTTPS 协议到后端服务的反向代理
+  - [x] SubTask 4.2: 实现 WSS (WebSocket Secure) 代理支持
+  - [x] SubTask 4.3: 实现四层 TCP 和 UDP 协议代理（支持无 SSL 处理的纯透传）
+- [x] Task 5: 性能优化与压测对标
+  - [x] SubTask 5.1: 针对核心代理路径进行无锁优化、并发调优及资源管理优化
+  - [x] SubTask 5.2: 编写基准测试与 h2o 进行对比，验证并发数和延迟表现
+  - [x] SubTask 5.3: 极限压力测试，确保高负载下稳定不易报错
+
+# Task Dependencies
+- [Task 2] depends on [Task 1]
+- [Task 3] depends on [Task 1]
+- [Task 4] depends on [Task 2] and [Task 3]
+- [Task 5] depends on [Task 4]

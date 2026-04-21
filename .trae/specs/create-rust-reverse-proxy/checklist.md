@@ -1,0 +1,15 @@
+- [x] 项目初始化完成，依赖树包含 `rustls` 和 `aws-lc-rs`
+- [x] 配置文件或启动参数支持开启/关闭 ECH
+- [x] 配置文件支持定义 HTTP/1.0 到 HTTP/3 的协议范围
+- [x] 成功加载并同时提供 RSA 和 ECC 双证书
+- [x] 支持自定义配置加密套件和 PSK 套件
+- [x] PQC / 混合算法可用，并可配置服务器优先偏好
+- [x] 可通过配置自定义注入或修改 HTTP Header
+- [x] 支持 HTTP/3 over QMux (draft-ietf-quic-qmux-01) 特性
+- [x] 成功代理 WSS、TCP 和 UDP 流量（无需 SSL 处理）
+- [x] 压测数据显示性能及并发能力达到或超越 h2o
+- [x] QUIC 支持 path migration 及 multipath (draft 05)
+- [x] 成功配置并工作正常的 OCSP 装订
+- [x] ALPN/NPN 握手中能正确识别和协商设定的多版本协议（含 IEEE 草案）
+- [x] 可自定义配置 EC 椭圆曲线并支持服务器偏好顺序优先
+- [x] 系统架构证明是极轻量、低内存占用且安全稳定的
