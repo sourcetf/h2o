@@ -46,7 +46,7 @@ async fn handle_h3_connection(conn: quinn::Connection) -> Result<()> {
     loop {
         match h3_conn.accept().await {
             Ok(Some(mut req_resolver)) => {
-                join_set.spawn(async move {
+                join_set.spawn_local(async move {
                     match req_resolver.resolve_request().await {
                         Ok((_req, mut stream)) => {
                             let resp = match http::Response::builder()
@@ -55,30 +55,16 @@ async fn handle_h3_connection(conn: quinn::Connection) -> Result<()> {
                                     Ok(r) => r,
                                     Err(_) => return,
                                 };
-                            if let Err(e) = stream.send_response(resp).await {
-                                eprintln!("h3 send response err: {}", e);
-                                return;
-                            }
-                            if let Err(e) = stream.send_data(Bytes::from_static(b"HTTP OK")).await {
-                                eprintln!("h3 send data err: {}", e);
-                                return;
-                            }
-                            if let Err(e) = stream.finish().await {
-                                eprintln!("h3 finish err: {}", e);
-                            }
+                            if let Err(_) = stream.send_response(resp).await { return; }
+                            if let Err(_) = stream.send_data(Bytes::from_static(b"HTTP OK")).await { return; }
+                            if let Err(_) = stream.finish().await { return; }
                         }
-                        Err(e) => eprintln!("h3 resolve err: {}", e),
+                        Err(_) => {}
                     }
                 });
             }
-            Ok(None) => {
-                println!("h3_conn.accept() returned None");
-                break;
-            }
-            Err(err) => {
-                eprintln!("Error accepting request: {}", err);
-                break;
-            }
+            Ok(None) => break,
+            Err(_) => break,
         }
     }
     
@@ -107,8 +93,9 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()
                 .unwrap();
-                
-            rt.block_on(async move {
+            
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
                 // HTTPS Configuration
                 let mut server_config = rustls::ServerConfig::builder()
                     .with_no_client_auth()
@@ -122,15 +109,35 @@ fn main() -> Result<()> {
                     .with_single_cert(certs, key).unwrap();
                 quic_config.alpn_protocols = vec![b"h3".to_vec()];
                 let quic_server_config = quinn::crypto::rustls::QuicServerConfig::try_from(quic_config).unwrap();
-                let quic_cfg = quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
                 
-                // QUIC Socket with SO_REUSEPORT
+                let mut quic_cfg = quinn::ServerConfig::with_crypto(Arc::new(quic_server_config));
+                let mut transport_config = quinn::TransportConfig::default();
+                // Extreme QUIC Tuning
+                transport_config.max_concurrent_bidi_streams(10_000u32.into());
+                transport_config.receive_window((1024 * 1024 * 10u32).into());
+                transport_config.stream_receive_window((1024 * 1024 * 10u32).into());
+                transport_config.datagram_receive_buffer_size(Some(1024 * 1024 * 10));
+                quic_cfg.transport_config(Arc::new(transport_config));
+                
+                // QUIC Socket with SO_REUSEPORT and SO_BUSY_POLL
                 let addr_quic: SocketAddr = "0.0.0.0:8443".parse().unwrap();
                 let domain = if addr_quic.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
                 let quic_socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).unwrap();
                 quic_socket.set_reuse_address(true).unwrap();
                 #[cfg(target_os = "linux")]
-                quic_socket.set_reuse_port(true).unwrap();
+                {
+                    quic_socket.set_reuse_port(true).unwrap();
+                    unsafe {
+                        let val: libc::c_int = 50; // 50 microseconds busy poll
+                        libc::setsockopt(
+                            std::os::unix::io::AsRawFd::as_raw_fd(&quic_socket),
+                            libc::SOL_SOCKET,
+                            libc::SO_BUSY_POLL,
+                            &val as *const libc::c_int as *const libc::c_void,
+                            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                        );
+                    }
+                }
                 quic_socket.bind(&addr_quic.into()).unwrap();
                 let std_udp_socket: std::net::UdpSocket = quic_socket.into();
                 std_udp_socket.set_nonblocking(true).unwrap();
@@ -143,25 +150,20 @@ fn main() -> Result<()> {
                 ).unwrap();
 
                 // Start QUIC/H3 listener
-                tokio::spawn(async move {
+                tokio::task::spawn_local(async move {
                     if i == 0 {
                         println!("proxy-core QUIC listening on 8443");
                     }
                     while let Some(incoming) = endpoint.accept().await {
-                        tokio::spawn(async move {
-                            match incoming.await {
-                                Ok(conn) => {
-                                    if let Err(e) = handle_h3_connection(conn).await {
-                                        eprintln!("h3 err: {}", e);
-                                    }
-                                }
-                                Err(e) => eprintln!("quic accept err: {}", e),
+                        tokio::task::spawn_local(async move {
+                            if let Ok(conn) = incoming.await {
+                                let _ = handle_h3_connection(conn).await;
                             }
                         });
                     }
                 });
 
-                // HTTPS Socket with SO_REUSEPORT
+                // HTTPS Socket with SO_REUSEPORT and SO_BUSY_POLL
                 let addr_https: SocketAddr = "0.0.0.0:8080".parse().unwrap();
                 let domain = if addr_https.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
                 let https_socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP)).unwrap();
@@ -169,7 +171,6 @@ fn main() -> Result<()> {
                 #[cfg(target_os = "linux")]
                 {
                     https_socket.set_reuse_port(true).unwrap();
-                    // Optional: TCP_DEFER_ACCEPT to delay wakeups until data arrives
                     unsafe {
                         let val: libc::c_int = 1;
                         libc::setsockopt(
@@ -177,6 +178,14 @@ fn main() -> Result<()> {
                             libc::IPPROTO_TCP,
                             libc::TCP_DEFER_ACCEPT,
                             &val as *const libc::c_int as *const libc::c_void,
+                            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                        );
+                        let poll_val: libc::c_int = 50; // 50 microseconds busy poll
+                        libc::setsockopt(
+                            std::os::unix::io::AsRawFd::as_raw_fd(&https_socket),
+                            libc::SOL_SOCKET,
+                            libc::SO_BUSY_POLL,
+                            &poll_val as *const libc::c_int as *const libc::c_void,
                             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
                         );
                     }
@@ -195,30 +204,19 @@ fn main() -> Result<()> {
                 loop {
                     let (stream, _) = match listener.accept().await {
                         Ok(res) => res,
-                        Err(e) => {
-                            eprintln!("accept error: {}", e);
-                            continue;
-                        }
+                        Err(_) => continue,
                     };
                     
                     let _ = stream.set_nodelay(true); // Optimization: TCP_NODELAY
                     
                     let tls_acceptor = tls_acceptor.clone();
                     
-                    tokio::spawn(async move {
-                        match tls_acceptor.accept(stream).await {
-                            Ok(tls_stream) => {
-                                let io = TokioIo::new(tls_stream);
-                                let mut builder = auto::Builder::new(hyper_util::rt::TokioExecutor::new());
-                                builder.http2().max_concurrent_streams(500);
-                                if let Err(err) = builder
-                                    .serve_connection(io, service_fn(handle_req))
-                                    .await
-                                {
-                                    eprintln!("Error serving connection: {:?}", err);
-                                }
-                            }
-                            Err(e) => eprintln!("tls error: {}", e),
+                    tokio::task::spawn_local(async move {
+                        if let Ok(tls_stream) = tls_acceptor.accept(stream).await {
+                            let io = TokioIo::new(tls_stream);
+                            let mut builder = auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+                            builder.http2().max_concurrent_streams(500);
+                            let _ = builder.serve_connection(io, service_fn(handle_req)).await;
                         }
                     });
                 }
