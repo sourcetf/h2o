@@ -1,0 +1,4 @@
+- [ ] 验证嗅探慢速攻击防御：使用 `nc 127.0.0.1 443` 连接但不发送任何数据，验证代理会在 3 秒后主动切断连接。
+- [ ] 验证域前置（Domain Fronting）防御：发送合法 SNI `security.source.tf` 的 TLS，但附加 HTTP/1.1 头 `Host: evil.internal.com`，验证该请求被拒绝或被重写为 `security.source.tf`。
+- [ ] 验证配置解析安全性：即使 `config.toml` 内的 `backend-headers` 包含带有 `\r\n` 的恶意字符串，代理程序（Rust）也不会崩溃，而是安全丢弃该头文件。
+- [ ] 验证前端读头超时 (Header Read Timeout)：发送超长的 HTTP Headers 且不结束，验证连接被代理在指定时间内切断。
