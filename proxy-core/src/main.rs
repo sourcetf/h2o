@@ -4,7 +4,7 @@ use std::io::BufReader;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use hyper_util::server::conn::auto;
+use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
 use hyper::{Request, Response, body::Bytes};
 use hyper_util::rt::TokioIo;
@@ -83,12 +83,15 @@ fn main() -> Result<()> {
     println!("Spawning {} worker threads", cores);
     
     let mut handles = vec![];
+    let core_ids = core_affinity::get_core_ids().unwrap();
 
     for i in 0..cores {
         let certs = certs.clone();
         let key = key.clone_key();
+        let core_id = core_ids[i % core_ids.len()];
         
         handles.push(std::thread::spawn(move || {
+            core_affinity::set_for_current(core_id);
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -209,14 +212,35 @@ fn main() -> Result<()> {
                     
                     let _ = stream.set_nodelay(true); // Optimization: TCP_NODELAY
                     
+                    #[cfg(target_os = "linux")]
+                    unsafe {
+                        let val: libc::c_int = 1;
+                        libc::setsockopt(
+                            std::os::unix::io::AsRawFd::as_raw_fd(&stream),
+                            libc::IPPROTO_TCP,
+                            libc::TCP_QUICKACK,
+                            &val as *const libc::c_int as *const libc::c_void,
+                            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                        );
+                    }
+                    
                     let tls_acceptor = tls_acceptor.clone();
                     
                     tokio::task::spawn_local(async move {
                         if let Ok(tls_stream) = tls_acceptor.accept(stream).await {
+                            let alpn = tls_stream.get_ref().1.alpn_protocol().map(|p| p.to_vec());
                             let io = TokioIo::new(tls_stream);
-                            let mut builder = auto::Builder::new(hyper_util::rt::TokioExecutor::new());
-                            builder.http2().max_concurrent_streams(500);
-                            let _ = builder.serve_connection(io, service_fn(handle_req)).await;
+                            
+                            if alpn.as_deref() == Some(b"h2") {
+                                let mut builder = http2::Builder::new(hyper_util::rt::TokioExecutor::new());
+                                builder.max_concurrent_streams(1_000_000);
+                                builder.initial_stream_window_size(1024 * 1024 * 10);
+                                builder.initial_connection_window_size(1024 * 1024 * 10);
+                                let _ = builder.serve_connection(io, service_fn(handle_req)).await;
+                            } else {
+                                let builder = http1::Builder::new();
+                                let _ = builder.serve_connection(io, service_fn(handle_req)).await;
+                            }
                         }
                     });
                 }
