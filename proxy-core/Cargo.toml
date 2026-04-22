@@ -21,3 +21,4 @@ http = "1.4.0"
 socket2 = { version = "0.6.3", features = ["all"] }
 libc = "0.2.185"
 core_affinity = "0.8.3"
+bytes = "1.11.1"

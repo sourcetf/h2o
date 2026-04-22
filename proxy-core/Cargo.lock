@@ -687,6 +687,7 @@ name = "proxy-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "core_affinity",
  "h3",
  "h3-quinn",
