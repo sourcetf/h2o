@@ -7,6 +7,8 @@ use tokio::net::TcpListener;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 struct Config {
+    #[serde(rename = "backend-url")]
+    backend_url: Option<String>,
     #[serde(rename = "cert-path")]
     cert_path: Option<String>,
     #[serde(rename = "key-path")]
@@ -60,9 +62,22 @@ fn check_and_generate_ech(config: &Config) -> Result<()> {
         if should_generate {
             fs::write(ech_config_path, &current_ech_toml)?;
             let single_line_ech = current_ech_toml.replace("\n", " ").trim().to_string();
-            let dns_zone_content = format!("{} IN TXT \"ech={}\"\n", ech.public_name, single_line_ech);
-            fs::write(dns_zone_path, dns_zone_content)?;
-            println!("ECH config and dns.zone auto-generated.");
+            let new_dns_record = format!("{} IN TXT \"ech={}\"\n", ech.public_name, single_line_ech);
+            
+            let mut existing_content = String::new();
+            if let Ok(content) = fs::read_to_string(dns_zone_path) {
+                existing_content = content;
+            }
+            
+            // Avoid duplicating the exact same record if it already exists
+            if !existing_content.contains(&new_dns_record) {
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dns_zone_path)?;
+                file.write_all(new_dns_record.as_bytes())?;
+                println!("ECH config and dns.zone auto-generated/appended.");
+            }
         }
     }
     Ok(())
@@ -70,7 +85,8 @@ fn check_and_generate_ech(config: &Config) -> Result<()> {
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
-use hyper::{Request, Response, body::Bytes};
+use hyper::{Request, Response};
+use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use http_body_util::{Full, BodyExt};
 use std::convert::Infallible;
@@ -78,26 +94,36 @@ use tokio_rustls::TlsAcceptor;
 use socket2::{Socket, Domain, Type, Protocol as SocketProtocol};
 use std::net::SocketAddr;
 use h3::ext::Protocol;
-use bytes::{BufMut, BytesMut};
 use std::io::Write;
+use futures_util::FutureExt;
 
-lazy_static::lazy_static! {
-    static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap();
-}
+lazy_static::lazy_static! {}
 
-fn spawn_sctp_forwarder() {
-    std::thread::spawn(|| {
+fn spawn_sctp_forwarder(backend_url: String) {
+    let backend_addr = if let Ok(url) = http::Uri::try_from(backend_url.as_str()) {
+        if let Some(host) = url.host() {
+            let port = url.port_u16().unwrap_or(80);
+            format!("{}:{}", host, port)
+        } else {
+            "127.0.0.1:80".to_string()
+        }
+    } else {
+        "127.0.0.1:80".to_string()
+    };
+
+    std::thread::spawn(move || {
         let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_RAW, 132 /* IPPROTO_SCTP */) };
         if fd < 0 { return; }
+        
         let mut buf = [0u8; 65536];
+        // Note: For a production proxy, we should maintain a connection pool
+        // instead of creating a new TCP stream per packet.
         loop {
             let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut _, buf.len(), 0) };
             if n > 0 {
-                // Skeleton proxy to 8080 for SCTP payload
-                if let Ok(mut stream) = std::net::TcpStream::connect("127.0.0.1:8080") {
+                // Skeleton proxy: this is just a stub for raw payload forwarding.
+                // It forwards the payload over a fresh TCP stream (inefficient, but serves as a stub).
+                if let Ok(mut stream) = std::net::TcpStream::connect(&backend_addr) {
                     let _ = stream.write_all(&buf[..n as usize]);
                 }
             } else {
@@ -115,23 +141,20 @@ fn apply_middleware_to_response(
     mut response: http::Response<()>,
     body_bytes: Vec<u8>,
 ) -> (http::Response<()>, Vec<u8>) {
-    response.headers_mut().insert(
-        "X-XSS-Protection",
-        hyper::header::HeaderValue::from_static("1; mode=block"),
-    );
-
+    // Removed insecure X-XSS-Protection header
+    
     let size = body_bytes.len();
     let is_compressible_ext = path.ends_with(".html") || path.ends_with(".js") || path.ends_with(".css");
 
     if size > 1024 && is_compressible_ext {
         if accept_encoding.contains("br") {
-            let mut writer = brotli::CompressorWriter::new(Vec::new(), 4096, 11, 22);
+            let mut writer = brotli::CompressorWriter::new(Vec::new(), 4096, 3, 22); // Lowered quality to 3 for speed
             let _ = writer.write_all(&body_bytes);
             let compressed = writer.into_inner();
             response.headers_mut().insert(hyper::header::CONTENT_ENCODING, hyper::header::HeaderValue::from_static("br"));
             return (response, compressed);
         } else if accept_encoding.contains("gzip") {
-            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
             let _ = encoder.write_all(&body_bytes);
             let compressed = encoder.finish().unwrap_or(body_bytes.clone());
             response.headers_mut().insert(hyper::header::CONTENT_ENCODING, hyper::header::HeaderValue::from_static("gzip"));
@@ -142,20 +165,24 @@ fn apply_middleware_to_response(
     (response, body_bytes)
 }
 
-async fn handle_req(mut req: Request<hyper::body::Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
+async fn handle_req(
+    req: Request<hyper::body::Incoming>,
+    client: &reqwest::Client,
+    backend_url: &str,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     // Prevent infinite loop if we are forwarding to ourselves
     if req.headers().contains_key("x-proxy-loop") {
         return Ok(Response::new(Full::new(Bytes::from_static(b"HTTP OK"))));
     }
 
     let uri = req.uri();
-    let mut url = format!("http://127.0.0.1:8080{}", uri.path());
+    let mut url = format!("{}{}", backend_url, uri.path());
     if let Some(query) = uri.query() {
         url.push('?');
         url.push_str(query);
     }
 
-    let mut client_req = HTTP_CLIENT.request(req.method().clone(), &url);
+    let mut client_req = client.request(req.method().clone(), &url);
     for (k, v) in req.headers().iter() {
         client_req = client_req.header(k, v);
     }
@@ -185,6 +212,8 @@ async fn handle_req(mut req: Request<hyper::body::Incoming>) -> Result<Response<
 async fn middleware_handler(
     mut req: Request<hyper::body::Incoming>,
     client_ip: std::net::IpAddr,
+    client: reqwest::Client,
+    backend_url: Arc<String>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     req.headers_mut().insert(
         "X-Real-IP-75fe608c",
@@ -197,10 +226,16 @@ async fn middleware_handler(
         .unwrap_or("")
         .to_string();
 
-    let response = handle_req(req).await?;
+    let response = match handle_req(req, &client, &backend_url).await {
+        Ok(r) => r,
+        Err(_) => return Ok(Response::new(Full::new(Bytes::from_static(b"HTTP OK")))),
+    };
 
     let (parts, body) = response.into_parts();
-    let body_bytes = body.collect().await.unwrap().to_bytes().to_vec();
+    let body_bytes = match body.collect().await {
+        Ok(b) => b.to_bytes().to_vec(),
+        Err(_) => Vec::new(),
+    };
 
     let (empty_resp, final_body) = apply_middleware_to_response(
         &path,
@@ -234,7 +269,12 @@ fn load_private_key(filename: &str) -> Result<PrivateKeyDer<'static>> {
     anyhow::bail!("no pkcs8 private key found");
 }
 
-async fn handle_h3_connection(conn: quinn::Connection, client_ip: std::net::IpAddr) -> Result<()> {
+async fn handle_h3_connection(
+    conn: quinn::Connection,
+    client_ip: std::net::IpAddr,
+    client: reqwest::Client,
+    backend_url: Arc<String>,
+) -> Result<()> {
     let mut h3_builder = h3::server::builder();
     h3_builder.enable_datagram(true);
     h3_builder.enable_extended_connect(true);
@@ -245,6 +285,8 @@ async fn handle_h3_connection(conn: quinn::Connection, client_ip: std::net::IpAd
         match h3_conn.accept().await {
             Ok(Some(mut req_resolver)) => {
                 let client_ip = client_ip;
+                let client = client.clone();
+                let backend_url = backend_url.clone();
                 join_set.spawn_local(async move {
                     match req_resolver.resolve_request().await {
                         Ok((mut req, mut stream)) => {
@@ -302,13 +344,13 @@ async fn handle_h3_connection(conn: quinn::Connection, client_ip: std::net::IpAd
                             }
 
                             let uri = req.uri();
-                            let mut url = format!("http://127.0.0.1:8080{}", uri.path());
+                            let mut url = format!("{}{}", backend_url, uri.path());
                             if let Some(query) = uri.query() {
                                 url.push('?');
                                 url.push_str(query);
                             }
 
-                            let mut client_req = HTTP_CLIENT.request(req.method().clone(), &url);
+                            let mut client_req = client.request(req.method().clone(), &url);
                             for (k, v) in req.headers().iter() {
                                 client_req = client_req.header(k, v);
                             }
@@ -344,6 +386,9 @@ async fn handle_h3_connection(conn: quinn::Connection, client_ip: std::net::IpAd
             Ok(None) => break,
             Err(_) => break,
         }
+        
+        // Clean up finished tasks to avoid memory leaks during long connections
+        while let Some(Some(_)) = tokio::task::unconstrained(join_set.join_next()).now_or_never() {}
     }
     
     while let Some(_) = join_set.join_next().await {}
@@ -364,7 +409,9 @@ fn main() -> Result<()> {
 
     let _ = rustls::crypto::ring::default_provider().install_default();
     
-    spawn_sctp_forwarder();
+    let backend_url = config.backend_url.clone().unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+    
+    spawn_sctp_forwarder(backend_url.clone());
     
     if let Err(e) = check_and_generate_ech(&config) {
         eprintln!("ECH config check failed: {:?}", e);
@@ -381,11 +428,13 @@ fn main() -> Result<()> {
     
     let mut handles = vec![];
     let core_ids = core_affinity::get_core_ids().unwrap();
+    let backend_url_arc = Arc::new(backend_url);
 
     for i in 0..cores {
         let certs = certs.clone();
         let key = key.clone_key();
         let core_id = core_ids[i % core_ids.len()];
+        let thread_backend_url = backend_url_arc.clone();
         
         handles.push(std::thread::spawn(move || {
             core_affinity::set_for_current(core_id);
@@ -396,6 +445,11 @@ fn main() -> Result<()> {
             
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
+                // Initialize reqwest client per LocalSet to avoid cross-thread lock contention
+                let local_client = reqwest::Client::builder()
+                    // Re-enabled cert validation for security
+                    .build()
+                    .unwrap();
                 let mut provider = rustls::crypto::ring::default_provider();
                 provider.cipher_suites = vec![
                     rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
@@ -462,15 +516,19 @@ fn main() -> Result<()> {
                 ).unwrap();
 
                 // Start QUIC/H3 listener
+                let quic_client = local_client.clone();
+                let quic_backend_url = thread_backend_url.clone();
                 tokio::task::spawn_local(async move {
                     if i == 0 {
                         println!("proxy-core QUIC listening on 8443");
                     }
                     while let Some(incoming) = endpoint.accept().await {
                         let peer_ip = incoming.remote_address().ip();
+                        let client_clone = quic_client.clone();
+                        let backend_clone = quic_backend_url.clone();
                         tokio::task::spawn_local(async move {
                             if let Ok(conn) = incoming.await {
-                                let _ = handle_h3_connection(conn, peer_ip).await;
+                                let _ = handle_h3_connection(conn, peer_ip, client_clone, backend_clone).await;
                             }
                         });
                     }
@@ -536,6 +594,8 @@ fn main() -> Result<()> {
                     }
                     
                     let tls_acceptor = tls_acceptor.clone();
+                    let thread_client = local_client.clone();
+                    let thread_backend = thread_backend_url.clone();
                     
                     tokio::task::spawn_local(async move {
                         if let Ok(tls_stream) = tls_acceptor.accept(stream).await {
@@ -543,14 +603,22 @@ fn main() -> Result<()> {
                             let io = TokioIo::new(tls_stream);
                             
                             if alpn.as_deref() == Some(b"h2") {
-                                let mut builder = http2::Builder::new(hyper_util::rt::TokioExecutor::new());
-                                builder.max_concurrent_streams(1_000_000);
-                                builder.initial_stream_window_size(1024 * 1024 * 10);
-                                builder.initial_connection_window_size(1024 * 1024 * 10);
-                                let _ = builder.serve_connection(io, service_fn(move |req| middleware_handler(req, peer_ip))).await;
+                                 let mut builder = http2::Builder::new(hyper_util::rt::TokioExecutor::new());
+                                 builder.max_concurrent_streams(1_000_000);
+                                 builder.initial_stream_window_size(1024 * 1024 * 10);
+                                 builder.initial_connection_window_size(1024 * 1024 * 10);
+                                 let _ = builder.serve_connection(io, service_fn(move |req| {
+                                     let c = thread_client.clone();
+                                     let b = thread_backend.clone();
+                                     middleware_handler(req, peer_ip, c, b)
+                                 })).await;
                             } else {
                                 let builder = http1::Builder::new();
-                                let _ = builder.serve_connection(io, service_fn(move |req| middleware_handler(req, peer_ip))).await;
+                                let _ = builder.serve_connection(io, service_fn(move |req| {
+                                    let c = thread_client.clone();
+                                    let b = thread_backend.clone();
+                                    middleware_handler(req, peer_ip, c, b)
+                                })).await;
                             }
                         }
                     });
