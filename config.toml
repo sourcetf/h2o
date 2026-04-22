@@ -1,5 +1,16 @@
+# Proxy Core Configuration
+
+# Certificate and Key Paths
+cert-path = "/web/cert/cert.pem"
+key-path = "/web/cert/cert.key"
+
+# Output paths for auto-generated files
+ech-output-path = "/workspace/ech_config"
+dns-zone-path = "/workspace/dns.zone"
+
+# ECH Configuration
 [ech]
-public-name = "example.com"
-cipher-suite = "TLS13_AES_256_GCM_SHA384"
+public-name = "v.qq.com"
+cipher-suite = "HKDF-SHA384/AES-256-GCM"
 max-name-length = 64
 advertise = true

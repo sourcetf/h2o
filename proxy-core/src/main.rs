@@ -7,6 +7,14 @@ use tokio::net::TcpListener;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 struct Config {
+    #[serde(rename = "cert-path")]
+    cert_path: Option<String>,
+    #[serde(rename = "key-path")]
+    key_path: Option<String>,
+    #[serde(rename = "ech-output-path")]
+    ech_output_path: Option<String>,
+    #[serde(rename = "dns-zone-path")]
+    dns_zone_path: Option<String>,
     ech: Option<EchConfig>,
     esni: Option<EsniConfig>, // Stub for ESNI old draft support
 }
@@ -35,30 +43,26 @@ struct EchConfig {
     advertise: bool,
 }
 
-fn check_and_generate_ech() -> Result<()> {
-    if let Ok(config_str) = fs::read_to_string("/workspace/config.toml") {
-        if let Ok(config) = toml::from_str::<Config>(&config_str) {
-            configure_esni_stub(&config.esni);
-            if let Some(ech) = config.ech {
-                let current_ech_toml = toml::to_string(&ech)?;
-                let ech_config_path = "/workspace/ech_config";
-                let dns_zone_path = "/workspace/dns.zone";
-                
-                let mut should_generate = true;
-                if let Ok(existing_ech) = fs::read_to_string(ech_config_path) {
-                    if existing_ech == current_ech_toml {
-                        should_generate = false;
-                    }
-                }
-                
-                if should_generate {
-                    fs::write(ech_config_path, &current_ech_toml)?;
-                    let single_line_ech = current_ech_toml.replace("\n", " ").trim().to_string();
-                    let dns_zone_content = format!("{} IN TXT \"ech={}\"\n", ech.public_name, single_line_ech);
-                    fs::write(dns_zone_path, dns_zone_content)?;
-                    println!("ECH config and dns.zone auto-generated.");
-                }
+fn check_and_generate_ech(config: &Config) -> Result<()> {
+    configure_esni_stub(&config.esni);
+    if let Some(ech) = &config.ech {
+        let current_ech_toml = toml::to_string(&ech)?;
+        let ech_config_path = config.ech_output_path.as_deref().unwrap_or("/workspace/ech_config");
+        let dns_zone_path = config.dns_zone_path.as_deref().unwrap_or("/workspace/dns.zone");
+        
+        let mut should_generate = true;
+        if let Ok(existing_ech) = fs::read_to_string(ech_config_path) {
+            if existing_ech == current_ech_toml {
+                should_generate = false;
             }
+        }
+        
+        if should_generate {
+            fs::write(ech_config_path, &current_ech_toml)?;
+            let single_line_ech = current_ech_toml.replace("\n", " ").trim().to_string();
+            let dns_zone_content = format!("{} IN TXT \"ech={}\"\n", ech.public_name, single_line_ech);
+            fs::write(dns_zone_path, dns_zone_content)?;
+            println!("ECH config and dns.zone auto-generated.");
         }
     }
     Ok(())
@@ -348,16 +352,29 @@ async fn handle_h3_connection(conn: quinn::Connection, client_ip: std::net::IpAd
 }
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let config_path = if args.len() > 1 {
+        &args[1]
+    } else {
+        "/workspace/config.toml"
+    };
+
+    let config_str = fs::read_to_string(config_path).context(format!("Failed to read config file at {}", config_path))?;
+    let config: Config = toml::from_str(&config_str).context("Failed to parse TOML config")?;
+
     let _ = rustls::crypto::ring::default_provider().install_default();
     
     spawn_sctp_forwarder();
     
-    if let Err(e) = check_and_generate_ech() {
+    if let Err(e) = check_and_generate_ech(&config) {
         eprintln!("ECH config check failed: {:?}", e);
     }
     
-    let certs = load_certs("/web/cert/cert.pem")?;
-    let key = load_private_key("/web/cert/cert.key")?;
+    let cert_path = config.cert_path.as_deref().unwrap_or("/web/cert/cert.pem");
+    let key_path = config.key_path.as_deref().unwrap_or("/web/cert/cert.key");
+    
+    let certs = load_certs(cert_path)?;
+    let key = load_private_key(key_path)?;
     
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     println!("Spawning {} worker threads", cores);
