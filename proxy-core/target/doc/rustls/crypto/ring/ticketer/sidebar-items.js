@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["make_ticket_generator"],"static":["TICKETER_AEAD"],"struct":["AeadTicketer","Ticketer"]};

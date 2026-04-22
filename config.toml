@@ -1,0 +1,5 @@
+[ech]
+public-name = "example.com"
+cipher-suite = "TLS13_AES_256_GCM_SHA384"
+max-name-length = 64
+advertise = true

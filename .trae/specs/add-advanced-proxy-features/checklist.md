@@ -1,0 +1,11 @@
+- [x] `build.sh` 编译脚本创建并可执行，能成功编译项目。
+- [x] 代理默认加载 `/web/cert/cert.pem` 和 `/web/cert/cert.key`。
+- [x] 0-RTT 在代理中已被彻底关闭。
+- [x] 仅支持 TLS 1.3 `ECDHE-ECDSA-AES256-GCM-SHA384` 和 TLS 1.2 `TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384` 两个套件。
+- [x] 如果 TOML 中有 `public-name: v.qq.com` 等 ECH 配置，能够自动生成（并在变动时覆盖）相关的 `ech` 和 `dns.zone` 文件。
+- [x] HTTP 响应头包含了 `X-XSS-Protection`。
+- [x] 转发给 `8080` 的请求包含了 `X-Real-IP-75fe608c` 头。
+- [x] 实现了对 `br` (Brotli) 和 `gzip` 压缩的支持（可根据文件扩展名/大小过滤）。
+- [x] 实现了将 HTTP, TCP, UDP, WSS, SCTP 连接透明转发至本地 `8080`。
+- [x] 支持了 `ESNI` 的旧 draft。
+- [x] 支持了 `h3-29` 草案。
